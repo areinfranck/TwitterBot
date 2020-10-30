@@ -1,7 +1,10 @@
+import requests
+import re
 import tweepy
 import time
 from datetime import datetime
 from langdetect import detect
+from langdetect.lang_detect_exception import LangDetectException
 
 # A list of authentications keys for the twitter API.
 authenticationKeys = []
@@ -29,12 +32,16 @@ print("*** Account Username: " + user.name + " ***\n")
 print("Now listening...")
 
 
-def format_message(tweet):
-    # To timestamp the tweet.
+def format_message(tweet, reason, discardedTweet):
+    # The following gets printed to the console:
     now = datetime.now()
     current_time = now.strftime("%H:%M:%S %D")
 
-    # The following gets printed to the console:
+    if discardedTweet:
+        print("*** The following tweet has been discarded due to " + reason + ": ***")
+    else:
+        print(">>>>>>> The following message has been RETWEETED: <<<<<<<")
+
     print("Tweet ID: ", tweet.id)
     print("Username: " + tweet.user.name)
     print("Message: \"" + tweet.full_text + "\"\n")
@@ -57,18 +64,31 @@ def media_attachment(tweetString):
 # Checks language of tweet.
 def check_language(tweetString):
     try:
-        english = detect(tweetString) != 'en'
-        return english
-    except tweepy.TweepError as languageError:
-        print('\nUnable to determine language, tweet skipped.\n')
-        print(languageError)
+        noURLString = re.sub(r'\w+:\/{2}[\d\w-]+(\.[\d\w-]+)*(?:(?:\/[^\s/]*))*', '', tweetString)
+        if not noURLString:
+            return True
+        return detect(noURLString) != 'en'
+    except LangDetectException as languageError:
+        print('\nUnable to determine language, tweet skipped.\n', languageError, "\n")
+        print("--------------------------------")
         return True
 
 
-# Checks if tweet contains instagram link (currently unused).
-def check_if_instagram(tweetString):
-    splitString = tweetString.split()
-    mediaLink = splitString[len(splitString) - 1]
+# Checks if media attachment redirects to Instagram.
+def is_instagram_link(tweetString):
+    try:
+        splitString = tweetString.split()
+        URL = splitString[len(splitString) - 1]
+
+        request = requests.head(URL, allow_redirects=True)
+        if request.url[:26] == "https://www.instagram.com/":
+            return True
+        else:
+            return False
+    except requests.RequestException as requestException:
+        print("\nUnable to determine link destination.\n", requestException, "\n")
+        print("--------------------------------")
+        return True
 
 
 class TwitterStreamListener(tweepy.streaming.StreamListener):
@@ -80,53 +100,38 @@ class TwitterStreamListener(tweepy.streaming.StreamListener):
         except tweepy.TweepError:
             print("\n---No status found with that ID---\n")
             return True
-
         try:
             def index_tweet(tweetString):
                 try:
-                    language = (detect(tweetString) != 'en')
-                except tweepy.TweepError as languageError:
-                    print('\nUnable to determine language, tweet skipped.\n')
-                    print(languageError)
-                    return True
-
-                try:
-                    # Checks to see if the tweet contains blacklist keywords.
-                    if blacklist_check(tweetString):
-                        print("*** The following tweet has been discarded due to BLACKLIST KEYWORD: ***")
-                        format_message(tweet)
+                    if blacklist_check(tweetString.lower()):
+                        format_message(tweet, "BLACKLIST KEYWORD", True)
                         return True
-                    # Checks to see if tweet has media attachment.
                     elif media_attachment(tweetString):
-                        print("*** The following tweet has been discarded due to NO MEDIA ATTACHMENT: ***")
-                        format_message(tweet)
+                        format_message(tweet, "NO MEDIA ATTACHMENT", True)
                         return True
-                    # Checks to see if tweet is in English.
+                    elif is_instagram_link(tweetString):
+                        format_message(tweet, "EXTERNAL LINK", True)
+                        return True
                     elif check_language(tweetString):
-                        print("*** The following tweet has been discarded due to NON-ENGLISH CHARACTERS: ***")
-                        format_message(tweet)
+                        format_message(tweet, "NON-ENGLISH CHARACTERS", True)
                         return True
                 except tweepy.TweepError as error:
-                    print("\nUnable to check criteria of tweet.")
-                    print(error.reason + "\n")
+                    print("\nUnable to check criteria of tweet.\n" + error.reason + "\n")
                     return True
 
-            if index_tweet(tweet.full_text.lower()):
+            if index_tweet(tweet.full_text):
                 # Called if tweet does not meet criteria.
                 return True
             else:
                 tweet.retweet()
-                print(">>>>>>> The following message has been RETWEETED: <<<<<<<")
-                format_message(tweet)
-                # After successfully retweeting, the bot won't tweet for another 10 minutes.
-                print("======= The bot will now sleep for 30 minutes.... =======")
+                format_message(tweet, "RETWEETED", False)
+                print("\n======= The bot will now sleep for 30 minutes.... =======\n")
                 time.sleep(1800)
                 print("\n======= Bot has resumed listening to Twitter feed.... =======\n")
                 return True
 
         except tweepy.TweepError as e:
-            print("\n*** Unable to scan the contents of the tweet. ***\n")
-            print(e.reason)
+            print("\n*** Unable to scan the contents of the tweet. ***\n" + e.reason)
             return True
 
     def on_error(self, status_code):
@@ -145,5 +150,4 @@ try:
 
     stream.filter(track=["#Husky"])
 except tweepy.TweepError as streamFilterError:
-    print("An error has occurred while filtering stream. Will try again...")
-    print(streamFilterError)
+    print("\nAn error has occurred while filtering stream. Will try again...\n", streamFilterError)
